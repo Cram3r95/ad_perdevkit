@@ -163,6 +163,8 @@ class AB4COGT():
         self.required_variables = 5 # id, obs_num, x, y, padding
         self.TINY_PREDICTION = False
         self.NUM_STEPS = 10 # To obtain predictions every n-th STEP
+        self.THRESHOLD_STEPS = 20 # Minimum number of observations out of self.OBS_LEN (e.g. 20 out of 50),
+                                  # to start predicting an agent
         self.NUM_PREDICTED_POSES = 4 # e.g. t+0, t+STEP, t+2*STEP, t+3*STEP
         
         self.prediction_network = get_prediction_model()
@@ -299,15 +301,18 @@ class AB4COGT():
             for i in range(len(filtered_objects.gt_3d_object_list)):
                 filtered_obj = filtered_objects.gt_3d_object_list[i]
 
+                # OBS: If a timestep i-th has not been truly observed, that particular observation (x,y,binary_flag) 
+                # is padded (that is, third dimension set to 0). Otherwise, set to 1
+                
                 if filtered_obj.type == "ego_vehicle":
                     if not "ego" in self.list_of_ids:
-                        self.list_of_ids["ego"] = [[0, 0, 1] for _ in range(self.OBS_LEN)] # Initialize buffer
+                        self.list_of_ids["ego"] = [[0, 0, 0] for _ in range(self.OBS_LEN)] # Initialize buffer
 
                     self.list_of_ids["ego"].append([filtered_obj.global_position.x, 
                                                     filtered_obj.global_position.y,
-                                                    0])
+                                                    1])
                     
-                    self.state[filtered_obj.object_id] = np.array(self.list_of_ids["ego"][-50:])
+                    self.state[filtered_obj.object_id] = np.array(self.list_of_ids["ego"][-self.OBS_LEN:])
 
                 else: # Other agents
                     adv_id = filtered_obj.object_id
@@ -316,13 +321,13 @@ class AB4COGT():
                     y_adv = filtered_obj.global_position.y
                     
                     if adv_id in self.list_of_ids:
-                        self.list_of_ids[adv_id].append([x_adv, y_adv, 0])
+                        self.list_of_ids[adv_id].append([x_adv, y_adv, 1])
                     else:
-                        self.list_of_ids[adv_id] = [[0, 0, 1] for _ in range(self.OBS_LEN)]
-                        self.list_of_ids[adv_id].append([x_adv, y_adv, 0])
+                        self.list_of_ids[adv_id] = [[0, 0, 0] for _ in range(self.OBS_LEN)]
+                        self.list_of_ids[adv_id].append([x_adv, y_adv, 1])
 
-                    self.state[adv_id] = np.array(self.list_of_ids[adv_id][-50:])
-                    if self.DEBUG: print(self.state[adv_id])
+                    self.state[adv_id] = np.array(self.list_of_ids[adv_id][-self.OBS_LEN:])
+                    if self.DEBUG: print("Agents state: ", self.state[adv_id])
 
             # Save current observations into .csv to be predicted offline
             
@@ -332,11 +337,12 @@ class AB4COGT():
             # Online prediction
 
             valid_agents_info, valid_agents_id = self.preprocess_trackers(self.state)
-            predictions, confidences = self.predict_agents(valid_agents_info, self.timestamp)
-
-            # Plot ROS markers
             
-            if len(predictions) > 0:
+            if valid_agents_info: # Agents with more than a certain number of observations
+                predictions, confidences = self.predict_agents(valid_agents_info, self.timestamp)
+
+                # Plot ROS markers
+            
                 self.plot_predictions_ros_markers(predictions, confidences, valid_agents_id) 
                 
             self.timestamp += 1 
@@ -347,24 +353,25 @@ class AB4COGT():
         
         predictions_markers_list = visualization_msgs.msg.MarkerArray()
         
-        for i, agent_predictions in enumerate(predictions):
+        for num_agent, agent_predictions in enumerate(predictions):
             for num_mode in range(agent_predictions.shape[0]):
                 agent_predictions_marker = visualization_msgs.msg.Marker()
                 agent_predictions_marker.header.frame_id = "/map"
                 agent_predictions_marker.header.stamp = self.ego_vehicle_location.header.stamp
             
-                agent_predictions_marker.ns = f"agent_{valid_agents_id[i]}_predictions"
+                agent_predictions_marker.ns = f"agent_{valid_agents_id[num_agent]}_predictions"
                 
                 agent_predictions_marker.action = agent_predictions_marker.ADD
                 agent_predictions_marker.lifetime = rospy.Duration.from_sec(0.2)
 
-                agent_predictions_marker.id = i*agent_predictions.shape[0] + num_mode
+                agent_predictions_marker.id = num_agent * agent_predictions.shape[0] + num_mode
                 agent_predictions_marker.type = visualization_msgs.msg.Marker.LINE_STRIP
 
                 agent_predictions_marker.color.r = 1.0
-                agent_predictions_marker.color.a = 1.0
                 agent_predictions_marker.scale.x = 0.3
                 agent_predictions_marker.pose.orientation.w = 1.0
+                
+                agent_predictions_marker.color.a = confidences[num_agent][num_mode]
             
                 assert self.PRED_LEN == agent_predictions.shape[1]
                 
@@ -407,10 +414,12 @@ class AB4COGT():
         for agent_id in agents_id:
             agent_info = agents_info_array[agents_info_array[:, 0] == agent_id]
 
-            if not (agent_info[:, -1] == 1).all():  # Avoid storing full-padded agents
+            # if not (agent_info[:, -1] == 1).all():  # Avoid storing full-padded agents
+            if np.sum(agent_info[:,-1] == 1) >= self.THRESHOLD_STEPS: # Only consider those that have at least 
+                                                                      # self.THRESHOLD_STEPS of observations
                 valid_agents_info.append(agent_info)
                 valid_agents_id.append(int(agent_info[0,0]))
-                
+                      
         return valid_agents_info, valid_agents_id
 
     def predict_agents(self, valid_agents_info, file_id):
@@ -431,19 +440,16 @@ class AB4COGT():
         # agent_info: 0 = track_id, 1 = timestep, 2 = x, 3 = y, 4 = padding
 
         for agent_info in valid_agents_info:
-            non_padded_agent_info = agent_info[agent_info[:, -1] == 0]
-
+            non_padded_agent_info = agent_info[agent_info[:, -1] == 1]
             trajs.append(non_padded_agent_info[:, 2:4])
-            
             steps.append(non_padded_agent_info[:, 1].astype(np.int64))
-
-            # Our ego-vehicle is always the first agent of the scenario
             
             track_ids.append(non_padded_agent_info[0, 0])
-
             object_types.append(get_object_type(object_type))
 
-        if trajs[0].shape[0] > 1:  # Our ego-vehicle must have at least two observations
+        # Our ego-vehicle is always the first agent of the scenario
+        
+        if trajs[0].shape[0] > 1:
 
             current_step_index = steps[0].tolist().index(self.OBS_LEN-1)
             pre_current_step_index = current_step_index-1
