@@ -1,0 +1,36 @@
+<launch>
+
+    <!-- Perception evaluation -->
+    
+    <arg name="perception_groundtruth_path_node" value="/ad_devkit/generate_perception_groundtruth_node"/> 
+
+    <group ns="$(arg perception_groundtruth_path_node)">
+        <param name="node_name" type="string" value="ad_devkit_eval_perception_node"/>
+
+        <!-- Subscribers -->
+
+        <param name="camera_info" type="string" value="/t4ac/perception/rectification/sensors/camera/center/rect/camera_info"/>
+
+        <param name="lidar" type="string" value="/t4ac/perception/sensors/lidar"/>
+        <param name="max_distance_lidar" type="int" value="150"/>
+
+        <!-- Publishers -->
+
+        <param name="groundtruth" type="string" value="$(arg perception_groundtruth_path_node)/perception_groundtruth"/>
+
+        <!-- Store data -->
+        
+        <param name="csv_path" type="string" value="/workspace/team_code/catkin_ws/src/ad_perdevkit/databases/perception/groundtruth.csv"/>
+    </group>
+    <node pkg="ad_perdevkit" type="t4ac_ab4cogt_node.py" name="t4ac_abcogt_node" output="screen"/> 
+
+</launch>
+
+<!-- Rosbag  -->
+<!-- Remember to use double - in clock and rate. It is not specified now since there are some problems when commenting (in XML format) 
+     this part of the code -->
+
+<!--
+<node pkg="rosbag" type="play" name="player" output="screen" args="-clock /home/robesafe/shared_home/rosbags_iv/1_town03_dia.bag -rate=0.2" required="true"/>
+<param name="/use_sim_time" value="true"/> 
+-->

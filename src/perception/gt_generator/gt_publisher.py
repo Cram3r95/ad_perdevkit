@@ -1,3 +1,6 @@
+#!/usr/bin/env python3.8
+# -*- coding: utf-8 -*-
+
 # ROS imports
 
 from ad_perdevkit.msg import GT_3D_Object, GT_3D_Object_list
@@ -18,6 +21,9 @@ class GT_Object():
         self.position_x = 0
         self.position_y = 0
         self.position_z = 0
+        self.global_position_x = 0
+        self.global_position_y = 0
+        self.global_position_z = 0
         self.h = 0
         self.w = 0
         self.l = 0
@@ -25,6 +31,9 @@ class GT_Object():
         self.velocity_x = 0
         self.velocity_y = 0
         self.velocity_z = 0
+        self.global_velocity_x = 0
+        self.global_velocity_y = 0
+        self.global_velocity_z = 0
         self.truncated = 1
         self.occluded = 3
 
@@ -35,7 +44,7 @@ class GTPublisher():
         self.pub_groundtruth = pub
 
     def new_msg(self, header):
-
+        
         self.object_list = GT_3D_Object_list()
         self.object_list.header.stamp = header.stamp
         self.object_list.header.frame_id = ""
@@ -63,6 +72,10 @@ class GTPublisher():
         obj.position.y = gt_object.position_y
         obj.position.z = gt_object.position_z
 
+        obj.global_position.x = gt_object.global_position_x
+        obj.global_position.y = gt_object.global_position_y
+        obj.global_position.z = gt_object.global_position_z
+        
         obj.dimensions.x = gt_object.l
         obj.dimensions.y = gt_object.w
         obj.dimensions.z = gt_object.h
@@ -72,6 +85,10 @@ class GTPublisher():
         obj.velocity.x = gt_object.velocity_x
         obj.velocity.y = gt_object.velocity_y
         obj.velocity.z = gt_object.velocity_z
+        
+        obj.global_velocity.x = gt_object.global_velocity_x
+        obj.global_velocity.y = gt_object.global_velocity_y
+        obj.global_velocity.z = gt_object.global_velocity_z
 
         obj.truncated = gt_object.truncated
         obj.occluded = gt_object.occluded

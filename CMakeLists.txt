@@ -29,6 +29,6 @@ catkin_package(CATKIN_DEPENDS
 )
 
 include_directories(
- ~/t4ac_ws/devel/include
+ /workspace/team_code/catkin_ws/devel/include
   ${catkin_INCLUDE_DIRS}
 )
