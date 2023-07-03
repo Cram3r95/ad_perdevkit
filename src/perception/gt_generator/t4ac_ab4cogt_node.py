@@ -44,6 +44,7 @@ from ad_perdevkit.msg import GT_3D_Object_list
 import carla
 import carla_common.transforms as trans
 import visualization_msgs.msg
+import geometry_msgs.msg
 
 from objects2gt import Objects2GT
 from gt_publisher import GTPublisher
@@ -303,7 +304,7 @@ class AB4COGT():
                         self.list_of_ids["ego"] = [[0, 0, 1] for _ in range(self.OBS_LEN)] # Initialize buffer
 
                     self.list_of_ids["ego"].append([filtered_obj.global_position.x, 
-                                                    - filtered_obj.global_position.y,
+                                                    filtered_obj.global_position.y,
                                                     0])
                     
                     self.state[filtered_obj.object_id] = np.array(self.list_of_ids["ego"][-50:])
@@ -312,7 +313,7 @@ class AB4COGT():
                     adv_id = filtered_obj.object_id
                     if self.DEBUG: print("Adversary ID: ", adv_id)
                     x_adv = filtered_obj.global_position.x
-                    y_adv = - filtered_obj.global_position.y
+                    y_adv = filtered_obj.global_position.y
                     
                     if adv_id in self.list_of_ids:
                         self.list_of_ids[adv_id].append([x_adv, y_adv, 0])
@@ -322,67 +323,61 @@ class AB4COGT():
 
                     self.state[adv_id] = np.array(self.list_of_ids[adv_id][-50:])
                     if self.DEBUG: print(self.state[adv_id])
-            
+
             # Save current observations into .csv to be predicted offline
             
             if self.safe_csv:
                 self.write_csv()
             
             # Online prediction
-              
-            agents_info = self.preprocess_trackers(self.state)
-            predictions, confidences = self.predict_agents(agents_info, self.timestamp)
-            
+
+            valid_agents_info, valid_agents_id = self.preprocess_trackers(self.state)
+            predictions, confidences = self.predict_agents(valid_agents_info, self.timestamp)
+
             # Plot ROS markers
             
             if len(predictions) > 0:
-                self.plot_predictions_ros_markers(predictions) 
+                self.plot_predictions_ros_markers(predictions, confidences, valid_agents_id) 
                 
             self.timestamp += 1 
     
-    def plot_predictions_ros_markers(self, scenario_predictions):
+    def plot_predictions_ros_markers(self, predictions, confidences, valid_agents_id):
         """
         """
         
         predictions_markers_list = visualization_msgs.msg.MarkerArray()
         
-        for i, agent_predictions in enumerate(scenario_predictions):
-            agent_predictions_marker = visualization_msgs.msg.Marker()
-            agent_predictions_marker.header.frame_id = "/map"
-            agent_predictions_marker.header.stamp = self.ego_vehicle_location.header.stamp
-        
-            agent_predictions_marker.ns = "motion_prediction_output"
+        for i, agent_predictions in enumerate(predictions):
+            for num_mode in range(agent_predictions.shape[0]):
+                agent_predictions_marker = visualization_msgs.msg.Marker()
+                agent_predictions_marker.header.frame_id = "/map"
+                agent_predictions_marker.header.stamp = self.ego_vehicle_location.header.stamp
             
-            agent_predictions_marker.action = agent_predictions_marker.ADD
-            agent_predictions_marker.lifetime = rospy.Duration.from_sec(0.2)
+                agent_predictions_marker.ns = f"agent_{valid_agents_id[i]}_predictions"
+                
+                agent_predictions_marker.action = agent_predictions_marker.ADD
+                agent_predictions_marker.lifetime = rospy.Duration.from_sec(0.2)
 
-            agent_predictions_marker.id = i
-            agent_predictions_marker.type = visualization_msgs.msg.Marker.LINE_LIST
+                agent_predictions_marker.id = i*agent_predictions.shape[0] + num_mode
+                agent_predictions_marker.type = visualization_msgs.msg.Marker.LINE_STRIP
 
-            agent_predictions_marker.color.r = 1.0
-            agent_predictions_marker.color.a = 1.0
-            agent_predictions_marker.scale.x = 0.3
-            agent_predictions_marker.pose.orientation.w = 1.0
+                agent_predictions_marker.color.r = 1.0
+                agent_predictions_marker.color.a = 1.0
+                agent_predictions_marker.scale.x = 0.3
+                agent_predictions_marker.pose.orientation.w = 1.0
             
-            
-        particular_monitorized_area_marker.pose.orientation.w = 1.0
+                assert self.PRED_LEN == agent_predictions.shape[1]
+                
+                for num_pred in range(self.PRED_LEN):
+                    point = geometry_msgs.msg.Point()
 
-        for p in area:
-            point = geometry_msgs.msg.Point()
+                    point.x = agent_predictions[num_mode,num_pred,0]
+                    point.y = agent_predictions[num_mode,num_pred,1]
+                    point.z = 0
 
-            point.x = p.x
-            point.y = p.y
-            point.z = 0.2
+                    agent_predictions_marker.points.append(point)
 
-            particular_monitorized_area_marker.points.append(point)
-
-        point = geometry_msgs.msg.Point()
-
-        point.x = area[0].x
-        point.y = area[0].y
-
-        particular_monitorized_area_marker.points.append(point) # To close the polygon
-        predictions_markers_list.markers.append(particular_monitorized_area_marker)
+                predictions_markers_list.markers.append(agent_predictions_marker)
 
         self.pub_predictions_marker.publish(predictions_markers_list)
         
@@ -402,22 +397,26 @@ class AB4COGT():
 
                 agents_info_array = np.vstack((agents_info_array, agent_info))
 
-        return agents_info_array
-
-    def predict_agents(self, agents_info_array, file_id):
-        """
-        """
+        # Avoid storing full-padded agents
         
         agents_id = np.unique(agents_info_array[:, 0], axis=0)
 
         valid_agents_info = []
+        valid_agents_id = []
 
         for agent_id in agents_id:
             agent_info = agents_info_array[agents_info_array[:, 0] == agent_id]
 
             if not (agent_info[:, -1] == 1).all():  # Avoid storing full-padded agents
                 valid_agents_info.append(agent_info)
+                valid_agents_id.append(int(agent_info[0,0]))
                 
+        return valid_agents_info, valid_agents_id
+
+    def predict_agents(self, valid_agents_info, file_id):
+        """
+        """
+             
         # Get agents of the scene (we assume the first one represents our ego-vehicle)
         # (N agents * 50) x 5 (track_id, timestep, x, y, padding)
         # Preprocess agents (relative displacements, orientation, etc.)
@@ -553,8 +552,8 @@ if __name__=="__main__":
     
     ab4cogt = AB4COGT() 
     
-    time = 20 # seconds
-    rospy.Timer(rospy.Duration(time), stop_callback)
+    # time = 20 # seconds
+    # rospy.Timer(rospy.Duration(time), stop_callback)
     
     while not rospy.is_shutdown():
         ab4cogt.generate_gt()
