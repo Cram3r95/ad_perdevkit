@@ -38,6 +38,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2, CameraInfo, Image
 from derived_object_msgs.msg import Object, ObjectArray
 from ad_perdevkit.msg import GT_3D_Object_list
+from std_msgs.msg import Header
 
 # Custom imports
 
@@ -58,10 +59,16 @@ from tf.transformations import euler_from_quaternion, quaternion_from_euler
 
 #######################################
 
+# IMPORTANT
+
+# TODO: Check additional padding when the object is not observed. An additional
+# study should be done to know how many observations steps had the relevant actors
+# (those with observation in t=0)
+
 # Aux functions
 
 LIFETIME = 0.5
-TIME_SCENARIO = 100 # Shutdown after these seconds once the node has started to collect
+TIME_SCENARIO = 120 # Shutdown after these seconds once the node has started to collect
                   # world data. If 0, it is assumed that the user will indicate when
                   # data collection is finished
 NUM_COLOURS = 32
@@ -268,9 +275,18 @@ class AB4COGT():
         self.ego_vehicle = None
         
         self.safe_csv = True
-        SCENARIO_ID = "route15_town04_testing"
+   
+        routes = dict()
+
+        routes[1] = "route22_town03_training"
+        routes[2] = "route15_town04_testing"
+        routes[3] = "route1_town01_training_threshold_3"
+        routes[4] = "route27_town03_training"
+
+        SCENARIO_ID = 3
+        
         root_path = "/workspace/team_code/catkin_ws/src/t4ac_unified_perception_layer/src/t4ac_prediction_module/data/datasets/CARLA"
-        self.results_path = f"{root_path}/scenario_{SCENARIO_ID}/poses"
+        self.results_path = f"{root_path}/scenario_{routes[SCENARIO_ID]}/poses"
         
         # Motion Prediction
         
@@ -281,7 +297,7 @@ class AB4COGT():
         
         node_name = rospy.get_param("/ad_devkit/generate_perception_groundtruth_node/node_name")
         rospy.init_node(node_name, anonymous=True)
-        self.rate = rospy.Rate(10)
+        # self.rate = rospy.Rate(10)
         
         ## Publishers
         
@@ -305,6 +321,17 @@ class AB4COGT():
         self.sub_location_ego = rospy.Subscriber("/t4ac/localization/pose", Odometry, self.localization_callback)
         self.sub_lidar_pcl = rospy.Subscriber(self.lidar_topic, PointCloud2, self.lidar_callback)
     
+        # Aux synchronization
+        
+        flag_processed_data_topic = "/t4ac/perception/flag_processed_data"
+        self.sub_flag_processed_data = rospy.Subscriber(flag_processed_data_topic, Header, self.flag_processed_data_callback)
+        
+        self.previous_simulation_iteration_stamp = rospy.Time.now()
+        time.sleep(1)
+        self.current_simulation_iteration_stamp = rospy.Time.now() # Current simulation iteration stamp must be 
+                                                                   # higher to previous simulation iteration
+                                                                   # to run step
+                                                                   
     # Class functions
     
     def write_csv(self, obs, timestamp):
@@ -328,22 +355,36 @@ class AB4COGT():
                         
     # Callbacks
     
+    def flag_processed_data_callback(self, flag_processed_data_msg):
+        """
+        """
+
+        self.current_simulation_iteration_stamp = flag_processed_data_msg.stamp
+        
+        if (self.current_simulation_iteration_stamp > self.previous_simulation_iteration_stamp):
+            self.previous_simulation_iteration_stamp = self.current_simulation_iteration_stamp
+            self.generate_gt()
+            
     def lidar_callback(self, lidar_msg):
         """
         """
     
         self.lidar_pcl = lidar_msg
-           
+   
     def localization_callback(self, location_msg):
         """
         """
 
         self.ego_vehicle_location = location_msg
-        self.generate_gt()
         
     def generate_gt(self):
         """
         """
+        
+        # while (self.current_simulation_iteration_stamp <= self.previous_simulation_iteration_stamp):
+        #     continue
+
+        # self.previous_simulation_iteration_stamp = self.current_simulation_iteration_stamp
         
         # ###########
         
@@ -354,8 +395,6 @@ class AB4COGT():
         #     traffic_light.set_state(carla.TrafficLightState.Green)
         
         # ###########
-        
-        # TODO: Why the rosparam is sometimes string, sometimes bool?
         
         start_adperdevkit = rospy.get_param('/t4ac/operation_modes/start_adperdevkit')
         if type(start_adperdevkit) != bool:
@@ -373,10 +412,15 @@ class AB4COGT():
            and (start_adperdevkit
                 or (self.SCENARIO_INITIALIZATION_TIME > 0 
                                  and time.time() - self.init_time >= self.SCENARIO_INITIALIZATION_TIME))):
+
+            # List current objects in the scenario buffer
+            
+            actors_scenario = list(self.list_of_ids.keys())
             
             if self.DEBUG: print(">>>>>>>>>>>>>>>>> Ego-vehicle: ", self.ego_vehicle)
            
             # Create GT generator
+            # TODO: Is it required to create these objects per timestamp?
             
             gt_publisher = GTPublisher(self.pub_groundtruth)
             gt_generator = Objects2GT(gt_publisher, self.camera_info, self.ego_vehicle)
@@ -482,14 +526,14 @@ class AB4COGT():
                     id_type = {}
                     
                     # We assume that the ego-vehicle is the first object since we have previously sorted from nearest to furthest
-                    
-                    state_types = []
-                    
+                                        
                     for i in range(len(filtered_objects.gt_3d_object_list)):
                         filtered_obj = filtered_objects.gt_3d_object_list[i]
 
                         # OBS: If a timestep i-th has not been truly observed, that particular observation (x,y,binary_flag) 
                         # is padded (that is, third dimension set to 0). Otherwise, set to 1
+                        
+                        # TODO: Is this required? You know the identifier of the ego
                         
                         if filtered_obj.type == "ego_vehicle":
                             if not "ego" in self.list_of_ids:
@@ -519,15 +563,33 @@ class AB4COGT():
                             
                             if self.DEBUG: print("Agents state: ", self.state[adv_id])
 
+                        if (self.timestamp > 0 
+                           and (filtered_obj.object_id in actors_scenario
+                                or "ego" in actors_scenario)):
+                            if filtered_obj.type == "ego_vehicle":
+                                agent_to_remove = actors_scenario.index("ego")
+                            else:
+                                agent_to_remove = actors_scenario.index(filtered_obj.object_id)
+                            actors_scenario.pop(agent_to_remove)
+
+                    # Set 0,0,0 (padding) for actors that are in the list_of_ids buffer but 
+                    # they have not been observed in the current timestamp
+
+                    # TODO: Is this correct?
+                    
+                    # if self.timestamp > 0:
+                    #     for non_observed_actor_id in actors_scenario:
+                    #         self.list_of_ids[non_observed_actor_id].append([0, 0, 0])
+                        
                     # Save current observations into .csv to be predicted offline
                     
                     if self.safe_csv:
                         self.write_csv(self.state, self.timestamp)
                         
-                        if TIME_SCENARIO > 0 and not self.init_stop_callback: 
-                            print("AB4COGT: Start collection data")
-                            rospy.Timer(rospy.Duration(TIME_SCENARIO), stop_callback)
-                            self.init_stop_callback = True
+                        # if TIME_SCENARIO > 0 and not self.init_stop_callback: 
+                        #     print("AB4COGT: Start collection data")
+                        #     rospy.Timer(rospy.Duration(TIME_SCENARIO), stop_callback)
+                        #     self.init_stop_callback = True
             
                     # Preprocess trackers
                     
@@ -546,20 +608,21 @@ class AB4COGT():
                         
                     # Online prediction
 
-                    if self.USE_PREDICTION and valid_agents_info:                  
+                    if self.USE_PREDICTION and valid_agents_info: 
                         # Predict agents
                         
                         predictions, confidences = self.motion_predictor.predict_agents(valid_agents_info, self.timestamp)
 
                         # Plot predictions ROS markers
 
-                        self.motion_predictor.plot_predictions_ros_markers(predictions, 
-                                                                        confidences, 
-                                                                        valid_agents_id, 
-                                                                        self.ego_vehicle_location.header.stamp,
-                                                                        COLOURS,
-                                                                        apply_colour=APPLY_RANDOM_COLOUR,
-                                                                        lifetime=LIFETIME)         
+                        if len(predictions) > 0:
+                            self.motion_predictor.plot_predictions_ros_markers(predictions, 
+                                                                            confidences, 
+                                                                            valid_agents_id, 
+                                                                            self.ego_vehicle_location.header.stamp,
+                                                                            COLOURS,
+                                                                            apply_colour=APPLY_RANDOM_COLOUR,
+                                                                            lifetime=LIFETIME)         
                             
             self.timestamp += 1 
              
@@ -569,5 +632,7 @@ if __name__=="__main__":
     
     ab4cogt = AB4COGT() 
     
-    while not rospy.is_shutdown():
-        ab4cogt.rate.sleep()
+    try:
+        rospy.spin()
+    except KeyboardInterrupt:
+        rospy.loginfo("Shutting down AD-PerDevKit node")
