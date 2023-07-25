@@ -144,7 +144,6 @@ if __name__=="__main__":
     carla_gt = CarlaGT() 
     
     while not rospy.is_shutdown():
-        print("ss")
         carla_gt.publish_detections()
         carla_gt.rate.sleep()
 

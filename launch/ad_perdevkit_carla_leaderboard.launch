@@ -16,7 +16,8 @@
 
         <!-- Publishers -->
 
-        <param name="groundtruth" type="string" value="$(arg perception_groundtruth_path_node)/perception_groundtruth"/>
+        <param name="pub_groundtruth" type="string" value="$(arg perception_groundtruth_path_node)/perception_groundtruth"/>
+        <param name="pub_groundtruth_markers" type="string" value="$(arg perception_groundtruth_path_node)/perception_groundtruth_markers"/>
 
         <!-- Store data -->
         

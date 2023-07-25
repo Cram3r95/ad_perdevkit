@@ -13,27 +13,38 @@ class GT_Object():
         self.type = ""
         self.object_id = 0
         self.alpha = 0
+        
         self.bounding_box_2D_size_x = 0
         self.bounding_box_2D_size_y = 0
         self.bounding_box_2D_center_x = 0
         self.bounding_box_2D_center_y = 0
         self.bounding_box_2D_center_theta = 0
+        
         self.position_x = 0
         self.position_y = 0
         self.position_z = 0
+        
         self.global_position_x = 0
         self.global_position_y = 0
         self.global_position_z = 0
+        
         self.h = 0
         self.w = 0
         self.l = 0
+        
         self.rotation_z = 0
         self.velocity_x = 0
         self.velocity_y = 0
         self.velocity_z = 0
+        
         self.global_velocity_x = 0
         self.global_velocity_y = 0
         self.global_velocity_z = 0
+        
+        self.global_angular_velocity_x = 0
+        self.global_angular_velocity_y = 0
+        self.global_angular_velocity_z = 0
+        
         self.truncated = 1
         self.occluded = 3
 
@@ -89,14 +100,21 @@ class GTPublisher():
         obj.global_velocity.x = gt_object.global_velocity_x
         obj.global_velocity.y = gt_object.global_velocity_y
         obj.global_velocity.z = gt_object.global_velocity_z
-
+        
+        # We assume the obstacle does not have rotation in the x and y-axis
+        
+        obj.global_angular_velocity.x = gt_object.global_angular_velocity_x
+        obj.global_angular_velocity.y = gt_object.global_angular_velocity_y
+        obj.global_angular_velocity.z = gt_object.global_angular_velocity_z
+        
         obj.truncated = gt_object.truncated
         obj.occluded = gt_object.occluded
 
         self.object_list.gt_3d_object_list.append(obj)
 
     def publish_groundtruth(self):
-
-        # print(self.object_list)
-
-        self.pub_groundtruth.publish(self.object_list)
+        try:
+            self.pub_groundtruth.publish(self.object_list)
+        except:
+            import pdb
+            pdb.set_trace()

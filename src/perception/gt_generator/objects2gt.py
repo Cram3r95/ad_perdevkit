@@ -28,7 +28,7 @@ from transformation_functions import *
 
 class Objects2GT():
 
-    def __init__(self, gt_publisher, camera_info, vehicle_info, use_filtering_as_ros_callback):
+    def __init__(self, gt_publisher, camera_info, vehicle_info):
 
         self.classification_list = ["Unknown", "Unknown_Small",
                                     "Unknown_Medium", "Unknown_Big",
@@ -38,12 +38,13 @@ class Objects2GT():
                                     "Motorcycle", "Other_Vehicle",
                                     "Barrier", "Sign"]
 
-        self.use_filtering_as_ros_callback = False
         self.gt_publisher = gt_publisher
         self.first_time = 0
-        self.pointcloud = None
         self.camera_info = camera_info
         self.ego_vehicle_id = vehicle_info.id
+        
+        self.pointcloud = None
+        self.RAY_TRACING = True
 
         self.intrisic_matrix = ros_intrinsics(self.camera_info.P)
         self.camera_resolution = (self.camera_info.width, self.camera_info.height)
@@ -149,10 +150,12 @@ class Objects2GT():
 
                     quat_xyzw = carla_objects_msg.objects[i].pose.orientation
                     quaternion = np.array((quat_xyzw.x, quat_xyzw.y, quat_xyzw.z, quat_xyzw.w))
-                    heading = heading_ego [2] - euler_from_quaternion(quaternion)[2]
-                    # Rotation base on KITTI
-                    heading = normalizeAngle(heading - np.pi/2)
-                    obj.rotation_z = heading
+                    heading_object = heading_ego[2] - euler_from_quaternion(quaternion)[2]
+                    
+                    # Rotation base on KITTI. If using CARLA, do not substract np.pi/2!!
+                    
+                    # heading = normalizeAngle(heading - np.pi/2)
+                    obj.rotation_z = heading_object
 
                     ### Reduce CARLA errors ###
 
@@ -176,9 +179,8 @@ class Objects2GT():
                         ### Filter based on lidar points ###
 
                         n_points_in_bb = 0
-
-                        if self.pointcloud is not None:
-
+                        
+                        if self.RAY_TRACING and self.pointcloud is not None:
                             # Visibility approximation (without rotation)
                             # (Using a bigger bounding box to filter most of the points)
 
@@ -186,7 +188,7 @@ class Objects2GT():
 
                             f_visible_bb_height = (lambda bb, points: abs(np.array(points[:,2]) - bb[2]) <= bb[5]/2)
                             f_visible_bb_radius = (lambda bb, points: np.sqrt((bb[0] - np.array(points[:,0])) ** 2 +\
-                                                                              (bb[1] - np.array(points[:,1])) ** 2) <= max_distance)
+                                                                            (bb[1] - np.array(points[:,1])) ** 2) <= max_distance)
 
                             bb_3d = (obj.position_x, obj.position_y, obj.position_z, obj.l, obj.w, obj.h, obj.rotation_z)
                             
@@ -206,26 +208,29 @@ class Objects2GT():
 
                             # Count number of points
                             n_points_in_bb = int(np.add.reduce(tuple(points_in_bb)))
-
-                        if(n_points_in_bb > 0):
+                        
+                        if n_points_in_bb > 0 or not self.RAY_TRACING:
                             
                             published_obj += 1
 
                             ### Local position, heading and velocities ###
 
-                            vel = carla_objects_msg.objects[i].twist.linear
-                            vel_lin = math.sqrt(pow(vel.x,2)+pow(vel.y,2))
-                            vel_ang = carla_objects_msg.objects[i].twist.angular.z
+                            vel_lin = carla_objects_msg.objects[i].twist.linear # Global 
+                            vel_ang = carla_objects_msg.objects[i].twist.angular # Global
 
-                            local_velocity = (np.asarray([vel.x, vel.y, vel.z]) - np.asarray([v_ego.x, v_ego.y, v_ego.z])).tolist()
+                            local_velocity = (np.asarray([vel_lin.x, vel_lin.y, vel_lin.z]) - np.asarray([v_ego.x, v_ego.y, v_ego.z])).tolist()
                             local_velocity = np.dot(R, local_velocity)
                             
-                            obj.global_velocity_x, obj.global_velocity_y, obj.global_velocity_z = (vel.x,
-                                                                                                   vel.y,
-                                                                                                   vel.z)
-
                             obj.velocity_x, obj.velocity_y, obj.velocity_z = local_velocity[0], local_velocity[1], local_velocity[2]
+                            
+                            obj.global_velocity_x, obj.global_velocity_y, obj.global_velocity_z = (vel_lin.x,
+                                                                                                   vel_lin.y,
+                                                                                                   vel_lin.z)
 
+                            obj.global_angular_velocity_x, obj.global_angular_velocity_y, obj.global_angular_velocity_z = (vel_ang.x,
+                                                                                                                           vel_ang.y,
+                                                                                                                           vel_ang.z)
+                             
                             location_camera = rospy.get_param("/t4ac/tf/base_link_to_camera_center_tf")[:3] # x,y,z
                             obj.alpha = normalizeAngle(math.atan2(location_local[1]-location_camera[1], location_local[0]-location_camera[0]))
 
@@ -287,8 +292,8 @@ class Objects2GT():
                     obj.global_position_x, obj.global_position_y, obj.global_position_z = (location[0],
                                                                                            location[1],
                                                                                            location[2])
-                    
-                    obj.rotation_z = heading_ego
+
+                    obj.rotation_z = heading_ego[2]
 
                     obj.velocity_x, obj.velocity_y, obj.velocity_z = 0, 0, 0
 
@@ -337,8 +342,8 @@ class Objects2GT():
         else:
             self.gt_publisher.add_empty_object()
 
-        # self.gt_publisher.publish_groundtruth()
-    
         if DEBUG: print("--- %s seconds ---" % (time.time() - start_time))
 
+        self.gt_publisher.publish_groundtruth()
+        
         return self.gt_publisher.object_list

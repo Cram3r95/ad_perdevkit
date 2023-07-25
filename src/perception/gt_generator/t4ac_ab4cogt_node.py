@@ -33,8 +33,8 @@ import rospy
 
 from shape_msgs.msg import SolidPrimitive
 from visualization_msgs.msg import MarkerArray, Marker
+from geometry_msgs.msg import Point
 from nav_msgs.msg import Odometry
-from carla_msgs.msg import CarlaEgoVehicleInfo
 from sensor_msgs.msg import PointCloud2, CameraInfo, Image
 from derived_object_msgs.msg import Object, ObjectArray
 from ad_perdevkit.msg import GT_3D_Object_list
@@ -43,8 +43,6 @@ from ad_perdevkit.msg import GT_3D_Object_list
 
 import carla
 import carla_common.transforms as trans
-import visualization_msgs.msg
-import geometry_msgs.msg
 
 from objects2gt import Objects2GT
 from gt_publisher import GTPublisher
@@ -53,37 +51,155 @@ from store_data import StoreData
 from av2.datasets.motion_forecasting.data_schema import ObjectType
 
 sys.path.append("/workspace/team_code")
-from catkin_ws.src.t4ac_unified_perception_layer.src.t4ac_prediction_module.get_prediction_model import get_prediction_model
-from catkin_ws.src.t4ac_unified_perception_layer.src.t4ac_prediction_module.plot_qualitative_results_simulation import plot_actor_tracks, plot_predictions, get_object_type
-from catkin_ws.src.t4ac_unified_perception_layer.src.t4ac_prediction_module.data import from_numpy
+
+from generic_modules.utils import str2bool
+from catkin_ws.src.t4ac_unified_perception_layer.src.t4ac_prediction_module.motion_predictor import Motion_Predictor 
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
 
 #######################################
 
 # Aux functions
 
-def get_marker(actor, color):
+LIFETIME = 0.5
+TIME_SCENARIO = 100 # Shutdown after these seconds once the node has started to collect
+                  # world data. If 0, it is assumed that the user will indicate when
+                  # data collection is finished
+NUM_COLOURS = 32
+COLOURS = np.random.rand(NUM_COLOURS,3) / 1.25
+APPLY_RANDOM_COLOUR = False
+
+colour_classes = {"Car":[0,0.2,1],
+                  "Truck":[0,0.2,1],
+                  "Other_Vehicle":[0,0.2,1],
+                  "Pedestrian":[0.6,0,0.1],
+                  "Motorcycle":[0.6,0,0.1],
+                  "Bike":[0.6,0,0.1],
+                  "Cyclist":[0.6,0,0.1]
+                  }
+
+def get_observations_marker(actor_info, id_types):
     """
     """
-    
+
     marker = Marker()
     marker.header.frame_id = "/map"
-    marker.type = marker.SPHERE
+    # marker.type = marker.LINE_STRIP
+    marker.type = marker.POINTS
     marker.action = marker.ADD
-    marker.scale.x = 10
-    marker.scale.y = 10
-    marker.scale.z = 10
-    marker.color.a = 1.0
-    marker.color.r = color[0]
-    marker.color.g = color[1]
-    marker.color.b = color[2]
+    marker.ns = "agents_observations"
+    marker.id = int(actor_info[0,0])
+    
+    marker.scale.x = 0.4
     marker.pose.orientation.w = 1.0
-    marker.lifetime = rospy.Duration.from_sec(0.1)
-    marker.pose.position.x = actor.get_transform().location.x
-    marker.pose.position.y = actor.get_transform().location.y
-    marker.pose.position.z = 0
-    marker.id = actor.id
+    
+    marker.color.a = 0.5
+    
+    if APPLY_RANDOM_COLOUR:
+        colour = COLOURS[int(actor_info[0,0])%NUM_COLOURS]
+    else:
+        colour = colour_classes[id_types[int(actor_info[0,0])]]
+        
+    marker.color.r = colour[0]
+    marker.color.g = colour[1]
+    marker.color.b = colour[2]
+    
+    marker.lifetime = rospy.Duration.from_sec(LIFETIME)
+    
+    observations = actor_info[actor_info[:,-1] == 1.0] # get non-padded observations
+    
+    for i in range(observations.shape[0]):
+        point = Point()
+
+        point.x = observations[i,2]
+        point.y = observations[i,3]
+        point.z = 0
+
+        marker.points.append(point)
     
     return marker
+
+def get_detection_marker(actor):
+    """
+    """
+                                
+    # Current position
+
+    marker_position = Marker()
+    marker_position.header.frame_id = "/map"
+    marker_position.type = marker_position.CUBE
+    marker_position.action = marker_position.ADD
+    marker_position.ns = "agents_detection"
+    marker_position.id = actor.object_id
+    
+    if actor.type == "Pedestrian" or actor.type == "Bike" or actor.type == "Cyclist" or actor.type == "Motorcycle":
+        marker_position.scale.x = actor.dimensions.x * 1.5
+        marker_position.scale.y = actor.dimensions.y * 1.5
+    else:
+        marker_position.scale.x = actor.dimensions.x
+        marker_position.scale.y = actor.dimensions.y
+        
+    marker_position.scale.z = actor.dimensions.z
+    
+    marker_position.color.a = 1.0
+    
+    if APPLY_RANDOM_COLOUR:
+        colour = COLOURS[marker_position.id%NUM_COLOURS]
+    else:
+        colour = colour_classes[actor.type]
+        
+    marker_position.color.r = colour[0]
+    marker_position.color.g = colour[1]
+    marker_position.color.b = colour[2]
+    
+    quaternion = quaternion_from_euler(0,0,actor.rotation_z)
+    marker_position.pose.orientation.x = quaternion[0]
+    marker_position.pose.orientation.y = quaternion[1]
+    marker_position.pose.orientation.z = quaternion[2]
+    marker_position.pose.orientation.w = quaternion[3]
+    
+    marker_position.lifetime = rospy.Duration.from_sec(LIFETIME)
+    
+    marker_position.pose.position.x = actor.global_position.x
+    marker_position.pose.position.y = actor.global_position.y
+    marker_position.pose.position.z = 0
+    
+    # Identification
+    
+    marker_id_text = Marker()
+    marker_id_text.header.frame_id = "/map"
+    marker_id_text.type = marker_id_text.TEXT_VIEW_FACING
+    marker_id_text.action = marker_id_text.ADD
+    marker_id_text.ns = "agents_detection_id"
+    marker_id_text.id = actor.object_id
+    
+    if actor.type == "Pedestrian" or actor.type == "Bike" or actor.type == "Cyclist" or actor.type == "Motorcycle":
+        marker_id_text.scale.z = 0.9
+    else:
+        marker_id_text.scale.z = 1.6
+    
+    marker_id_text.text = str(actor.object_id)
+    
+    marker_id_text.color.a = 1.0
+
+    # White identifier
+    
+    marker_id_text.color.r = 1
+    marker_id_text.color.g = 1
+    marker_id_text.color.b = 1
+    
+    quaternion = quaternion_from_euler(0,0,actor.rotation_z)
+    marker_id_text.pose.orientation.x = quaternion[0]
+    marker_id_text.pose.orientation.y = quaternion[1]
+    marker_id_text.pose.orientation.z = quaternion[2]
+    marker_id_text.pose.orientation.w = quaternion[3]
+    
+    marker_id_text.lifetime = rospy.Duration.from_sec(LIFETIME)
+    
+    marker_id_text.pose.position.x = actor.global_position.x
+    marker_id_text.pose.position.y = actor.global_position.y
+    marker_id_text.pose.position.z = 2
+    
+    return marker_position, marker_id_text
 
 def get_current_ros_pose(carla_actor):
     """
@@ -117,7 +233,9 @@ def get_current_ros_accel(carla_actor):
         carla_actor.get_acceleration())
 
 def stop_callback(event):
-    print("Kill node. Time finished.")
+    """
+    """
+    print("AB4COGT: Stop collecting data")
     rospy.signal_shutdown("Just stopping publishing...")
 
 # Main class (Perform detection and tracking using LiDAR-based ray-tracing to obtain the ground-truth -> prediction)
@@ -128,54 +246,54 @@ class AB4COGT():
         """
         
         self.DEBUG = False
+        self.PREPROCESS_TRACKERS = True
+        self.RAY_TRACING_FILTER = True
+        self.init_time = time.time()
+        self.SCENARIO_INITIALIZATION_TIME = 0 # seconds. TODO: Is there a flag that indicates
+        # when the star of the scenario? (i.e. When the CARLA world starts moving)
+        self.init_stop_callback = False
         
         self.client = carla.Client("localhost", 2000)
         self.client.set_timeout(2.0)
         self.world = self.client.get_world()
         
-        retry_count = 10
-        while retry_count > 0:
-            if len(self.world.get_actors()) > 0:
-                self.ego_vehicle = self.world.get_actors().filter('vehicle.*.*')[0]
-                break
-            else:
-                time.sleep(1.0)
-
-        if self.DEBUG: print(">>>>>>>>>>>>>>>>> Ego-vehicle: ", self.ego_vehicle)
-        
-        if retry_count == 0 and len(self.world.get_actors()) == 0:
-            raise ValueError('Actors not populated in time')
-        
         self.list_of_ids = {}
         self.state = {}
         self.timestamp = 0
-        self.safe_csv = False
         self.range = 150
         self.max_agents = 11 # including ego-vehicle (only for Decision-Making module)
         
         self.lidar_pcl = None
         self.ego_vehicle_location = None
+        self.ego_vehicle = None
+        
+        self.safe_csv = True
+        SCENARIO_ID = "route15_town04_testing"
+        root_path = "/workspace/team_code/catkin_ws/src/t4ac_unified_perception_layer/src/t4ac_prediction_module/data/datasets/CARLA"
+        self.results_path = f"{root_path}/scenario_{SCENARIO_ID}/poses"
         
         # Motion Prediction
         
-        self.OBS_LEN = 50
-        self.PRED_LEN = 60
-        self.required_variables = 5 # id, obs_num, x, y, padding
-        self.TINY_PREDICTION = False
-        self.NUM_STEPS = 10 # To obtain predictions every n-th STEP
-        self.THRESHOLD_STEPS = 20 # Minimum number of observations out of self.OBS_LEN (e.g. 20 out of 50),
-                                  # to start predicting an agent
-        self.NUM_PREDICTED_POSES = 4 # e.g. t+0, t+STEP, t+2*STEP, t+3*STEP
-        
-        self.prediction_network = get_prediction_model()
+        self.USE_PREDICTION = True
+        self.motion_predictor = Motion_Predictor(self.USE_PREDICTION)
 
         # ROS communications
-        
-        self.use_filtering_as_ros_callback = False
         
         node_name = rospy.get_param("/ad_devkit/generate_perception_groundtruth_node/node_name")
         rospy.init_node(node_name, anonymous=True)
         self.rate = rospy.Rate(10)
+        
+        ## Publishers
+        
+        self.pub_non_filtered_groundtruth = rospy.Publisher("/ad_devkit/generate_perception_groundtruth_node/perception_non_filtered_groundtruth", 
+                                                            ObjectArray, 
+                                                            queue_size=10)
+        
+        groundtruth_topic = rospy.get_param("/ad_devkit/generate_perception_groundtruth_node/pub_groundtruth")
+        self.pub_groundtruth = rospy.Publisher(groundtruth_topic, GT_3D_Object_list, queue_size=10)
+        
+        groundtruth_markers_topic = rospy.get_param("/ad_devkit/generate_perception_groundtruth_node/pub_groundtruth_markers")
+        self.pub_gt_marker = rospy.Publisher(groundtruth_markers_topic, MarkerArray, queue_size=10)
         
         ## Subscribers
         
@@ -186,15 +304,29 @@ class AB4COGT():
         
         self.sub_location_ego = rospy.Subscriber("/t4ac/localization/pose", Odometry, self.localization_callback)
         self.sub_lidar_pcl = rospy.Subscriber(self.lidar_topic, PointCloud2, self.lidar_callback)
-        
-        ## Publishers
-        
-        self.pub_gt = rospy.Publisher("/gt_detections", MarkerArray, queue_size=20)
-        
-        groundtruth = rospy.get_param("/ad_devkit/generate_perception_groundtruth_node/groundtruth")
-        self.pub_groundtruth = rospy.Publisher(groundtruth, GT_3D_Object_list, queue_size=10)
-        
-        self.pub_predictions_marker = rospy.Publisher("/t4ac/perception/prediction/prediction_markers", MarkerArray, queue_size=10)
+    
+    # Class functions
+    
+    def write_csv(self, obs, timestamp):
+        """
+        """
+
+        if not os.path.exists(self.results_path):
+            print("Create results path folder: ", self.results_path)
+            os.makedirs(self.results_path)
+
+        with open(f'{self.results_path}/poses_{timestamp}.csv', 'w', newline='') as file:
+            writer = csv.writer(file, delimiter=' ', quotechar='|', quoting=csv.QUOTE_MINIMAL)
+
+            for key in obs.keys():
+                for num_obs in range(len(obs[key])):
+                    writer.writerow([key, 
+                                     num_obs, 
+                                     obs[key][num_obs][0],
+                                     obs[key][num_obs][1],
+                                     obs[key][num_obs][2]])
+                        
+    # Callbacks
     
     def lidar_callback(self, lidar_msg):
         """
@@ -205,19 +337,49 @@ class AB4COGT():
     def localization_callback(self, location_msg):
         """
         """
-    
+
         self.ego_vehicle_location = location_msg
+        self.generate_gt()
         
     def generate_gt(self):
         """
         """
+        
+        # ###########
+        
+        # Set traffic lights to green
+
+        # traffic_lights = self.world.get_actors().filter('traffic.traffic_light*')
+        # for traffic_light in traffic_lights:
+        #     traffic_light.set_state(carla.TrafficLightState.Green)
+        
+        # ###########
+        
+        # TODO: Why the rosparam is sometimes string, sometimes bool?
+        
+        start_adperdevkit = rospy.get_param('/t4ac/operation_modes/start_adperdevkit')
+        if type(start_adperdevkit) != bool:
+            start_adperdevkit = str2bool(start_adperdevkit)
+            
         if self.DEBUG: print(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 
-        if self.lidar_pcl and self.ego_vehicle_location:
+        if len(self.world.get_actors().filter('vehicle.*.*')) > 0:
+            # We assume that the ego-vehicle is the first element of the vehicles list 
+            self.ego_vehicle = self.world.get_actors().filter('vehicle.*.*')[0]
+                              
+        if (self.lidar_pcl 
+           and self.ego_vehicle_location 
+           and self.ego_vehicle
+           and (start_adperdevkit
+                or (self.SCENARIO_INITIALIZATION_TIME > 0 
+                                 and time.time() - self.init_time >= self.SCENARIO_INITIALIZATION_TIME))):
+            
+            if self.DEBUG: print(">>>>>>>>>>>>>>>>> Ego-vehicle: ", self.ego_vehicle)
+           
             # Create GT generator
             
             gt_publisher = GTPublisher(self.pub_groundtruth)
-            gt_generator = Objects2GT(gt_publisher, self.camera_info, self.ego_vehicle, self.use_filtering_as_ros_callback)
+            gt_generator = Objects2GT(gt_publisher, self.camera_info, self.ego_vehicle)
 
             # Get all objects (only walkers and vehicles) in the world within a specific range
             # More info: https://carla.readthedocs.io/en/latest/core_actors/
@@ -283,338 +445,129 @@ class AB4COGT():
                 
                 actor_list_ros.objects.append(actor_ros)
             
-            # Store current point-cloud
-
-            gt_generator.store_pointcloud(self.lidar_pcl)
-
-            # Filter objects according to LiDAR ray-tracing (get realistic GT)
-
-            filtered_objects = gt_generator.callback(actor_list_ros)
-            if self.DEBUG: print("Number of filtered objects: ", len(filtered_objects.gt_3d_object_list))
-
-            # Preprocess filtered objects as input for the Motion Prediction algorithm
-
-            self.state.clear()
+            self.pub_non_filtered_groundtruth.publish(actor_list_ros)
             
-            # We assume that the ego-vehicle is the first object since we have previously sorted from nearest to furthest
-   
-            for i in range(len(filtered_objects.gt_3d_object_list)):
-                filtered_obj = filtered_objects.gt_3d_object_list[i]
-
-                # OBS: If a timestep i-th has not been truly observed, that particular observation (x,y,binary_flag) 
-                # is padded (that is, third dimension set to 0). Otherwise, set to 1
+            # Ray-tracing-based filter
+            
+            if self.RAY_TRACING_FILTER:
+                # Store current point-cloud
                 
-                if filtered_obj.type == "ego_vehicle":
-                    if not "ego" in self.list_of_ids:
-                        self.list_of_ids["ego"] = [[0, 0, 0] for _ in range(self.OBS_LEN)] # Initialize buffer
+                gt_generator.store_pointcloud(self.lidar_pcl)
 
-                    self.list_of_ids["ego"].append([filtered_obj.global_position.x, 
-                                                    filtered_obj.global_position.y,
-                                                    1])
-                    
-                    self.state[filtered_obj.object_id] = np.array(self.list_of_ids["ego"][-self.OBS_LEN:])
+                # Filter objects according to LiDAR ray-tracing (get realistic GT)
 
-                else: # Other agents
-                    adv_id = filtered_obj.object_id
-                    if self.DEBUG: print("Adversary ID: ", adv_id)
-                    x_adv = filtered_obj.global_position.x
-                    y_adv = filtered_obj.global_position.y
-                    
-                    if adv_id in self.list_of_ids:
-                        self.list_of_ids[adv_id].append([x_adv, y_adv, 1])
-                    else:
-                        self.list_of_ids[adv_id] = [[0, 0, 0] for _ in range(self.OBS_LEN)]
-                        self.list_of_ids[adv_id].append([x_adv, y_adv, 1])
+                filtered_objects = gt_generator.callback(actor_list_ros)
+                if self.DEBUG: print("Number of filtered objects: ", len(filtered_objects.gt_3d_object_list))
 
-                    self.state[adv_id] = np.array(self.list_of_ids[adv_id][-self.OBS_LEN:])
-                    if self.DEBUG: print("Agents state: ", self.state[adv_id])
-
-            # Save current observations into .csv to be predicted offline
-            
-            if self.safe_csv:
-                self.write_csv()
-            
-            # Online prediction
-
-            valid_agents_info, valid_agents_id = self.preprocess_trackers(self.state)
-            
-            if valid_agents_info: # Agents with more than a certain number of observations
-                predictions, confidences = self.predict_agents(valid_agents_info, self.timestamp)
-
-                # Plot ROS markers
-            
-                self.plot_predictions_ros_markers(predictions, confidences, valid_agents_id) 
+                ## Publish filtered object as ROS markers
                 
+                gt_detections_marker_list = MarkerArray()
+                
+                for num_object, filtered_object in enumerate(filtered_objects.gt_3d_object_list):
+                    if num_object > 0: # Avoid plotting the ego-vehicle, we already have the URDF marker
+                        orientation_q = self.ego_vehicle_location.pose.pose.orientation
+                        orientation_list = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
+                        (ego_roll, ego_pitch, ego_yaw) = euler_from_quaternion(orientation_list)
+                        
+                        filtered_object.rotation_z = ego_yaw - filtered_object.rotation_z 
+                        
+                        marker_position, marker_id_text = get_detection_marker(filtered_object)
+                        gt_detections_marker_list.markers.append(marker_position)
+                        gt_detections_marker_list.markers.append(marker_id_text)
+                
+                # Preprocess filtered objects as input for the Motion Prediction algorithm
+
+                if self.PREPROCESS_TRACKERS:
+                    self.state.clear()
+                    id_type = {}
+                    
+                    # We assume that the ego-vehicle is the first object since we have previously sorted from nearest to furthest
+                    
+                    state_types = []
+                    
+                    for i in range(len(filtered_objects.gt_3d_object_list)):
+                        filtered_obj = filtered_objects.gt_3d_object_list[i]
+
+                        # OBS: If a timestep i-th has not been truly observed, that particular observation (x,y,binary_flag) 
+                        # is padded (that is, third dimension set to 0). Otherwise, set to 1
+                        
+                        if filtered_obj.type == "ego_vehicle":
+                            if not "ego" in self.list_of_ids:
+                                self.list_of_ids["ego"] = [[0, 0, 0] for _ in range(self.motion_predictor.OBS_LEN)] # Initialize buffer
+
+                            self.list_of_ids["ego"].append([filtered_obj.global_position.x, 
+                                                            filtered_obj.global_position.y,
+                                                            1])
+                            
+                            self.state[filtered_obj.object_id] = np.array(self.list_of_ids["ego"][-self.motion_predictor.OBS_LEN:])
+                            id_type[filtered_obj.object_id] = filtered_obj.type
+                            
+                        else: # Other agents
+                            adv_id = filtered_obj.object_id
+                            if self.DEBUG: print("Adversary ID: ", adv_id)
+                            x_adv = filtered_obj.global_position.x
+                            y_adv = filtered_obj.global_position.y
+                            
+                            if adv_id in self.list_of_ids:
+                                self.list_of_ids[adv_id].append([x_adv, y_adv, 1])
+                            else:
+                                self.list_of_ids[adv_id] = [[0, 0, 0] for _ in range(self.motion_predictor.OBS_LEN)]
+                                self.list_of_ids[adv_id].append([x_adv, y_adv, 1])
+
+                            self.state[adv_id] = np.array(self.list_of_ids[adv_id][-self.motion_predictor.OBS_LEN:])
+                            id_type[filtered_obj.object_id] = filtered_obj.type
+                            
+                            if self.DEBUG: print("Agents state: ", self.state[adv_id])
+
+                    # Save current observations into .csv to be predicted offline
+                    
+                    if self.safe_csv:
+                        self.write_csv(self.state, self.timestamp)
+                        
+                        if TIME_SCENARIO > 0 and not self.init_stop_callback: 
+                            print("AB4COGT: Start collection data")
+                            rospy.Timer(rospy.Duration(TIME_SCENARIO), stop_callback)
+                            self.init_stop_callback = True
+            
+                    # Preprocess trackers
+                    
+                    valid_agents_info, valid_agents_id = self.motion_predictor.preprocess_trackers(self.state)
+                        
+                    if valid_agents_info: # Agents with more than a certain number of observations
+                        # Plot observations ROS markers
+                        
+                        for num_object, valid_agent_info in enumerate(valid_agents_info):
+                            if num_object > 0: # Avoid plotting the ego-vehicle, we already have the URDF marker
+                                marker = get_observations_marker(valid_agent_info, 
+                                                                 id_type)
+                                gt_detections_marker_list.markers.append(marker)
+
+                        self.pub_gt_marker.publish(gt_detections_marker_list)
+                        
+                    # Online prediction
+
+                    if self.USE_PREDICTION and valid_agents_info:                  
+                        # Predict agents
+                        
+                        predictions, confidences = self.motion_predictor.predict_agents(valid_agents_info, self.timestamp)
+
+                        # Plot predictions ROS markers
+
+                        self.motion_predictor.plot_predictions_ros_markers(predictions, 
+                                                                        confidences, 
+                                                                        valid_agents_id, 
+                                                                        self.ego_vehicle_location.header.stamp,
+                                                                        COLOURS,
+                                                                        apply_colour=APPLY_RANDOM_COLOUR,
+                                                                        lifetime=LIFETIME)         
+                            
             self.timestamp += 1 
-    
-    def plot_predictions_ros_markers(self, predictions, confidences, valid_agents_id):
-        """
-        """
-        
-        predictions_markers_list = visualization_msgs.msg.MarkerArray()
-        
-        for num_agent, agent_predictions in enumerate(predictions):
-            for num_mode in range(agent_predictions.shape[0]):
-                agent_predictions_marker = visualization_msgs.msg.Marker()
-                agent_predictions_marker.header.frame_id = "/map"
-                agent_predictions_marker.header.stamp = self.ego_vehicle_location.header.stamp
-            
-                agent_predictions_marker.ns = f"agent_{valid_agents_id[num_agent]}_predictions"
-                
-                agent_predictions_marker.action = agent_predictions_marker.ADD
-                agent_predictions_marker.lifetime = rospy.Duration.from_sec(0.2)
-
-                agent_predictions_marker.id = num_agent * agent_predictions.shape[0] + num_mode
-                agent_predictions_marker.type = visualization_msgs.msg.Marker.LINE_STRIP
-
-                agent_predictions_marker.color.r = 1.0
-                agent_predictions_marker.scale.x = 0.3
-                agent_predictions_marker.pose.orientation.w = 1.0
-                
-                agent_predictions_marker.color.a = confidences[num_agent][num_mode]
-            
-                assert self.PRED_LEN == agent_predictions.shape[1]
-                
-                for num_pred in range(self.PRED_LEN):
-                    point = geometry_msgs.msg.Point()
-
-                    point.x = agent_predictions[num_mode,num_pred,0]
-                    point.y = agent_predictions[num_mode,num_pred,1]
-                    point.z = 0
-
-                    agent_predictions_marker.points.append(point)
-
-                predictions_markers_list.markers.append(agent_predictions_marker)
-
-        self.pub_predictions_marker.publish(predictions_markers_list)
-        
-    def preprocess_trackers(self, trajectories):
-        """
-        """
-        
-        agents_info_array = np.zeros([0, self.required_variables])
-
-        for key, value in trajectories.items():
-            for num_obs in range(self.OBS_LEN):
-                agent_info = np.array([key,
-                                        num_obs,
-                                        value[num_obs,0],
-                                        value[num_obs,1],
-                                        value[num_obs,2]])
-
-                agents_info_array = np.vstack((agents_info_array, agent_info))
-
-        # Avoid storing full-padded agents
-        
-        agents_id = np.unique(agents_info_array[:, 0], axis=0)
-
-        valid_agents_info = []
-        valid_agents_id = []
-
-        for agent_id in agents_id:
-            agent_info = agents_info_array[agents_info_array[:, 0] == agent_id]
-
-            # if not (agent_info[:, -1] == 1).all():  # Avoid storing full-padded agents
-            if np.sum(agent_info[:,-1] == 1) >= self.THRESHOLD_STEPS: # Only consider those that have at least 
-                                                                      # self.THRESHOLD_STEPS of observations
-                valid_agents_info.append(agent_info)
-                valid_agents_id.append(int(agent_info[0,0]))
-                      
-        return valid_agents_info, valid_agents_id
-
-    def predict_agents(self, valid_agents_info, file_id):
-        """
-        """
              
-        # Get agents of the scene (we assume the first one represents our ego-vehicle)
-        # (N agents * 50) x 5 (track_id, timestep, x, y, padding)
-        # Preprocess agents (relative displacements, orientation, etc.)
-
-        trajs, steps, track_ids, object_types = [], [], [], []
-        final_predictions, final_confidences = [], []
-
-        # TODO: Write here the corresponding object type, though at this moment it is not used
-        
-        object_type = ObjectType.VEHICLE
-
-        # agent_info: 0 = track_id, 1 = timestep, 2 = x, 3 = y, 4 = padding
-
-        for agent_info in valid_agents_info:
-            non_padded_agent_info = agent_info[agent_info[:, -1] == 1]
-            trajs.append(non_padded_agent_info[:, 2:4])
-            steps.append(non_padded_agent_info[:, 1].astype(np.int64))
-            
-            track_ids.append(non_padded_agent_info[0, 0])
-            object_types.append(get_object_type(object_type))
-
-        # Our ego-vehicle is always the first agent of the scenario
-        
-        if trajs[0].shape[0] > 1:
-
-            current_step_index = steps[0].tolist().index(self.OBS_LEN-1)
-            pre_current_step_index = current_step_index-1
-
-            orig = trajs[0][current_step_index][:2].copy().astype(np.float32)
-            pre = trajs[0][pre_current_step_index][:2] - orig
-
-            theta = np.arctan2(pre[1], pre[0])
-            rot = np.asarray([[np.cos(theta), -np.sin(theta)],
-
-                              [np.sin(theta), np.cos(theta)]], np.float32)
-
-            feats, ctrs, valid_track_ids, valid_object_types = [], [], [], []
-
-            for traj, step, track_id, object_type in zip(trajs, steps, track_ids, object_types):
-
-                if self.OBS_LEN-1 not in step:
-
-                    continue
-
-                valid_track_ids.append(track_id)
-                valid_object_types.append(object_type)
-
-                obs_mask = step < self.OBS_LEN
-                step = step[obs_mask]
-                traj = traj[obs_mask]
-                idcs = step.argsort()
-                step = step[idcs]
-                traj = traj[idcs]
-                feat = np.zeros((self.OBS_LEN, 3), np.float32)
-
-                feat[step, :2] = np.matmul(
-                    rot, (traj[:, :2] - orig.reshape(-1, 2)).T).T
-                feat[step, 2] = 1.0
-
-                ctrs.append(feat[-1, :2].copy())
-                feat[1:, :2] -= feat[:-1, :2]
-
-                feat[step[0], :2] = 0
-                feats.append(feat)
-
-            feats = np.asarray(feats, np.float32)
-            ctrs = np.asarray(ctrs, np.float32)
-            data = dict()
-
-            # OBS: Our network must receive a list (batch) per value of the dictionary. In this case, we only want
-            # to analyze a single scenario, so the values must be introduced as lists of 1 element, indicating
-            # batch_size = 1
-
-            data['scenario_id'] = [file_id]
-            data['track_ids'] = [valid_track_ids]
-            data['object_types'] = [np.asarray(valid_object_types, np.float32)]
-            data['feats'] = [feats]
-            data['ctrs'] = [ctrs]
-            data['orig'] = [orig]
-            data['theta'] = [theta]
-            data['rot'] = [rot]
-
-            # Recursively transform numpy.ndarray to torch.Tensor
-            data = from_numpy(data)
-
-            output = self.prediction_network(data)
-
-            for agent_index in range(feats.shape[0]):
-                agent_mm_pred = output["reg"][0][agent_index,
-                                                 :, :, :].cpu().data.numpy()
-                agent_cls = output["cls"][0][agent_index, :].cpu().data.numpy()
-
-                if self.TINY_PREDICTION: # Unimodal prediction (60 x 2)
-                    most_probable_mode_index = np.argmax(agent_cls)
-                    agent_um_pred = agent_mm_pred[most_probable_mode_index, :, :]
-                    agent_um_pred = agent_um_pred[::self.STEP,
-                                                  :][:self.NUM_PREDICTED_POSES, :]
-                    final_predictions.append(agent_um_pred)
-
-                else:
-                    final_predictions.append(agent_mm_pred)
-                    final_confidences.append(agent_cls)
-
-        return final_predictions, final_confidences
-            
-    def write_csv(self):
-        """
-        """
-        
-        results_path = "/workspace/team_code/catkin_ws/src/t4ac_unified_perception_layer/src/t4ac_prediction_module/poses"
-
-        if not os.path.exists(results_path):
-            print("Create results path folder: ", results_path)
-            os.makedirs(results_path)
-
-        with open(f'{results_path}/poses_{self.timestamp}.csv', 'w', newline='') as file:
-            writer = csv.writer(file, delimiter=' ', quotechar='|', quoting=csv.QUOTE_MINIMAL)
-
-            for key in self.state.keys():
-                for num_obs in range(self.OBS_LEN):
-                    writer.writerow([key, 
-                                    num_obs, 
-                                    self.state[key][num_obs][0],
-                                    self.state[key][num_obs][1],
-                                    self.state[key][num_obs][2]])
-        
 if __name__=="__main__":
     """
     """
     
     ab4cogt = AB4COGT() 
     
-    # time = 20 # seconds
-    # rospy.Timer(rospy.Duration(time), stop_callback)
-    
     while not rospy.is_shutdown():
-        ab4cogt.generate_gt()
         ab4cogt.rate.sleep()
-        
-    
-    
-# # Plot trajectories
-
-# def plot_trajectories():
-#     if PLOT_OBSERVATIONS:
-
-#         # Create figure
-
-#         fig = plt.figure(1, figsize=(8, 7))
-
-#         ax = fig.add_subplot(111)
-
-#         plot_actor_tracks(ax, valid_agents_info)
-
-#         if PLOT_PREDICTIONS and predictions:
-
-#             for agent_index in range(len(predictions)):
-
-#                 if agent_index == 0:
-
-#                     color = "#FAC205"
-
-#                 else:
-
-#                     color = "#15B01A"
-
-#                 if TINY_PREDICTION:  # Unimodal, best score
-
-#                     agent_um_pred = predictions[agent_index]
-
-#                     plot_predictions(
-#                         agent_um_pred, purpose="unimodal", color=color)
-
-#                 else:
-
-#                     agent_mm_pred = predictions[agent_index]
-
-#                     agent_cls = confidences[agent_index]
-
-#                     plot_predictions(agent_mm_pred, agent_cls, color=color)
-
-#         plt.xlim([-30, 30], auto=False)
-
-#         plt.ylim([0, 120], auto=False)
-
-#         filename = os.path.join(
-#             SAVE_DIR, ADDITIONAL_STRING+str(file_id)+".png")
-
-#         plt.savefig(filename, bbox_inches='tight',
-#                     facecolor="white", edgecolor='none', pad_inches=0)
-
-#         plt.close('all')
