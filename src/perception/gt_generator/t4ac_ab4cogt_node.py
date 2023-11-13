@@ -39,6 +39,7 @@ from sensor_msgs.msg import PointCloud2, CameraInfo, Image
 from derived_object_msgs.msg import Object, ObjectArray
 from ad_perdevkit.msg import GT_3D_Object_list
 from std_msgs.msg import Header
+from t4ac_msgs.msg import BEV_detections_list
 
 # Custom imports
 
@@ -49,6 +50,7 @@ from objects2gt import Objects2GT
 from gt_publisher import GTPublisher
 from gt2csv import GT2CSV
 from store_data import StoreData
+from ab4cogt2sort_functions import get_gtlist_as_BEV
 from av2.datasets.motion_forecasting.data_schema import ObjectType
 
 sys.path.append("/workspace/team_code")
@@ -252,9 +254,11 @@ class AB4COGT():
         """
         """
         
+        # Aux variables
+        
         self.DEBUG = False
-        self.PREPROCESS_TRACKERS = True
         self.RAY_TRACING_FILTER = True
+        self.PREPROCESS_TRACKERS = True
         self.init_time = time.time()
         self.SCENARIO_INITIALIZATION_TIME = 0 # seconds. TODO: Is there a flag that indicates
         # when the star of the scenario? (i.e. When the CARLA world starts moving)
@@ -274,7 +278,7 @@ class AB4COGT():
         self.ego_vehicle_location = None
         self.ego_vehicle = None
         
-        self.safe_csv = True
+        self.safe_csv = False
    
         routes = dict()
 
@@ -290,7 +294,7 @@ class AB4COGT():
         
         # Motion Prediction
         
-        self.USE_PREDICTION = True
+        self.USE_PREDICTION = False
         self.motion_predictor = Motion_Predictor(self.USE_PREDICTION)
 
         # ROS communications
@@ -301,10 +305,15 @@ class AB4COGT():
         
         ## Publishers
         
+        # Aux GT for SmartMOT. There should be a single GT for the whole architecture
+        
+        self.pub_BEV_groundtruth_obstacles = rospy.Publisher("/t4ac/perception/detection/BEV_groundtruth_obstacles",\
+                                                             BEV_detections_list, queue_size=10)
+
         self.pub_non_filtered_groundtruth = rospy.Publisher("/ad_devkit/generate_perception_groundtruth_node/perception_non_filtered_groundtruth", 
                                                             ObjectArray, 
                                                             queue_size=10)
-        
+
         groundtruth_topic = rospy.get_param("/ad_devkit/generate_perception_groundtruth_node/pub_groundtruth")
         self.pub_groundtruth = rospy.Publisher(groundtruth_topic, GT_3D_Object_list, queue_size=10)
         
@@ -416,7 +425,7 @@ class AB4COGT():
             # List current objects in the scenario buffer
             
             actors_scenario = list(self.list_of_ids.keys())
-            
+
             if self.DEBUG: print(">>>>>>>>>>>>>>>>> Ego-vehicle: ", self.ego_vehicle)
            
             # Create GT generator
@@ -490,6 +499,11 @@ class AB4COGT():
                 actor_list_ros.objects.append(actor_ros)
             
             self.pub_non_filtered_groundtruth.publish(actor_list_ros)
+            
+            # Aux for SmartMOT
+            
+            groundtruth_BEV_list = get_gtlist_as_BEV(actor_list_ros, self.ego_vehicle.id)
+            self.pub_BEV_groundtruth_obstacles.publish(groundtruth_BEV_list)
             
             # Ray-tracing-based filter
             

@@ -26,12 +26,3 @@
     <node pkg="ad_perdevkit" type="t4ac_ab4cogt_node.py" name="t4ac_abcogt_node" output="screen"/> 
 
 </launch>
-
-<!-- Rosbag  -->
-<!-- Remember to use double - in clock and rate. It is not specified now since there are some problems when commenting (in XML format) 
-     this part of the code -->
-
-<!--
-<node pkg="rosbag" type="play" name="player" output="screen" args="-clock /home/robesafe/shared_home/rosbags_iv/1_town03_dia.bag -rate=0.2" required="true"/>
-<param name="/use_sim_time" value="true"/> 
--->
